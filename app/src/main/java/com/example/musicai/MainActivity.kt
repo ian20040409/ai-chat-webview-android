@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface // 確保引入這個
+import android.view.MotionEvent
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox // Added for Pull-to-refresh
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,12 +44,11 @@ import com.example.musicai.ui.theme.MusicAiTheme
 import kotlinx.coroutines.delay
 
 const val HOME_URL = "https://lnu.nttu.edu.tw/"
-private const val TOOLBAR_AUTO_HIDE_DELAY_MS = 1500L // 修改為 3 秒
+private const val TOOLBAR_AUTO_HIDE_DELAY_MS = 1500L
 private const val JAVASCRIPT_INTERFACE_NAME = "AndroidInterface"
 
 // JavaScript Interface 類別
 class WebViewJavaScriptInterface(private val onShowToolbar: () -> Unit) {
-    // 確保 JS 調用的方法在主線程執行以更新 UI
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
@@ -60,11 +61,9 @@ class WebViewJavaScriptInterface(private val onShowToolbar: () -> Unit) {
 
 class MainActivity : ComponentActivity() {
     private var webViewInstance: WebView? = null
-    private var showToolbarState by mutableStateOf(false) // 將 showToolbar 提升為 Activity 的狀態
-
-    // JavaScript Interface 實例
+    private var showToolbarState by mutableStateOf(false)
     private lateinit var jsInterface: WebViewJavaScriptInterface
-
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -78,7 +77,7 @@ class MainActivity : ComponentActivity() {
                     webViewInstance?.goBack()
                 } else {
                     isEnabled = false
-                    onBackPressedDispatcher.onBackPressed() // 使用 Activity 的 onBackPressedDispatcher
+                    onBackPressedDispatcher.onBackPressed()
                     isEnabled = true
                 }
             }
@@ -87,12 +86,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MusicAiTheme {
-                // 使用 showToolbarState 來驅動 UI
                 var currentShowToolbar by remember { mutableStateOf(showToolbarState) }
                 val context = LocalContext.current
+                var isWebViewRefreshing by remember { mutableStateOf(false) } // State for pull-to-refresh
 
-                // 監聽 showToolbarState 的變化來更新 currentShowToolbar
-                // 這樣可以確保 LaunchedEffect 正確地基於 Compose 可觀察的狀態觸發
                 LaunchedEffect(showToolbarState) {
                     currentShowToolbar = showToolbarState
                 }
@@ -100,7 +97,6 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(currentShowToolbar) {
                     if (currentShowToolbar) {
                         delay(TOOLBAR_AUTO_HIDE_DELAY_MS)
-                        // 再次檢查，避免在用戶連續觸發時，舊的計時器錯誤地關閉了新的顯示請求
                         if (currentShowToolbar && showToolbarState) {
                             showToolbarState = false
                         }
@@ -108,48 +104,71 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    delay(500) // 稍微延遲初始的顯示和隱藏，給 WebView 一點載入時間
+                    delay(500)
                     showToolbarState = true
                     delay(TOOLBAR_AUTO_HIDE_DELAY_MS - 1000L)
                     if (showToolbarState) showToolbarState = false
                 }
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black)
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onTap = { showToolbarState = true }
-                            )
-                        }
+                // PullToRefreshBox wraps the content that needs pull-to-refresh
+                PullToRefreshBox(
+                    isRefreshing = isWebViewRefreshing,
+                    onRefresh = {
+                        isWebViewRefreshing = true
+                        webViewInstance?.reload()
+                        // isWebViewRefreshing will be set to false in onPageReloaded callback
+                    },
+                    modifier = Modifier.fillMaxSize()
                 ) {
-                    MyWebView(
-                        modifier = Modifier.fillMaxSize(),
-                        initialUrl = HOME_URL,
-                        javascriptInterface = jsInterface, // 傳遞 JS Interface
-                        onWebViewReady = { webView ->
-                            webViewInstance = webView
-                        }
-                    )
-
-                    FloatingIslandToolbar(
-                        isVisible = currentShowToolbar, // 使用 currentShowToolbar
-                        onShare = {
-                            val currentUrl = webViewInstance?.url
-                            if (!currentUrl.isNullOrEmpty()) {
-                                shareUrl(context, currentUrl)
-                            }
-                            showToolbarState = false
-                        },
-                        onGoHomeWithRefreshIcon = {
-                            webViewInstance?.loadUrl(HOME_URL)
-                            showToolbarState = false
-                        },
+                    Box(
                         modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 32.dp)
-                    )
+                            .fillMaxSize()
+                            .background(Color.Black)
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onTap = { showToolbarState = true }
+                                )
+                            }
+                    ) {
+                        MyWebView(
+                            modifier = Modifier.fillMaxSize(),
+                            initialUrl = HOME_URL,
+                            javascriptInterface = jsInterface,
+                            onWebViewReady = { webView ->
+                                webViewInstance = webView
+                                webView.setOnTouchListener { _, event ->
+                                    if (event.action == MotionEvent.ACTION_UP) {
+                                        showToolbarState = true
+                                    }
+                                    false
+                                }
+                            },
+                            onPageReloaded = { // Callback to stop the refresh indicator
+                                isWebViewRefreshing = false
+                            }
+                        )
+
+                        FloatingIslandToolbar(
+                            isVisible = currentShowToolbar,
+                            onShare = {
+                                val currentUrl = webViewInstance?.url
+                                if (!currentUrl.isNullOrEmpty()) {
+                                    shareUrl(context, currentUrl)
+                                }
+                                showToolbarState = false
+                            },
+                            onGoHomeWithRefreshIcon = {
+                                webViewInstance?.loadUrl(HOME_URL)
+                                // Optionally, show refresh indicator while loading home,
+                                // then onPageReloaded will hide it.
+                                // isWebViewRefreshing = true
+                                showToolbarState = false
+                            },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 32.dp)
+                        )
+                    }
                 }
             }
         }
@@ -210,41 +229,34 @@ fun shareUrl(context: Context, url: String) {
 fun MyWebView(
     modifier: Modifier = Modifier,
     initialUrl: String,
-    javascriptInterface: WebViewJavaScriptInterface, // 接收 JS Interface
-    onWebViewReady: (WebView) -> Unit
+    javascriptInterface: WebViewJavaScriptInterface,
+    onWebViewReady: (WebView) -> Unit,
+    onPageReloaded: () -> Unit // New callback for when page reload finishes
 ) {
     AndroidView(
         factory = { context ->
             WebView(context).apply {
-                setBackgroundColor(android.graphics.Color.TRANSPARENT) // 使用 android.graphics.Color
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
                 val nightModeFlags = context.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
                 val isSystemInDarkMode = nightModeFlags == android.content.res.Configuration.UI_MODE_NIGHT_YES
-                android.util.Log.d("WebViewTheme", "System is in dark mode: $isSystemInDarkMode") // 新增 Log
-                // .
+                android.util.Log.d("WebViewTheme", "System is in dark mode: $isSystemInDarkMode")
 
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) { // API 33+
-                    settings.isAlgorithmicDarkeningAllowed = isSystemInDarkMode // 如果系統是深色，設為 true
-                } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) { // API 29-32
-                    if (isSystemInDarkMode) {
-                        settings.forceDark = android.webkit.WebSettings.FORCE_DARK_AUTO // 確保是 AUTO
-                    } else {
-                        settings.forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
-                    }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    settings.isAlgorithmicDarkeningAllowed = isSystemInDarkMode
+                } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    settings.forceDark = if (isSystemInDarkMode) android.webkit.WebSettings.FORCE_DARK_AUTO else android.webkit.WebSettings.FORCE_DARK_OFF
                 }
-
-
 
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
-                // 將 JS Interface 添加到 WebView
                 addJavascriptInterface(javascriptInterface, JAVASCRIPT_INTERFACE_NAME)
 
-                webViewClient = object : CustomWebViewClient() {
+                // Pass the onPageReloaded callback to CustomWebViewClient
+                webViewClient = object : CustomWebViewClient(onPageReloaded) {
                     override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        // 頁面載入完成後注入 JavaScript
+                        super.onPageFinished(view, url) // This will call onPageReloaded
                         val script = """
                             (function() {
                                 let debounceTimeout;
@@ -252,17 +264,16 @@ fun MyWebView(
                                     clearTimeout(debounceTimeout);
                                     debounceTimeout = setTimeout(function() {
                                         var atTop = window.scrollY <= 0;
-                                        var atBottom = (window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 5; // 5px 容差
+                                        var atBottom = (window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 5;
                                         
                                         if (atTop || atBottom) {
                                             if (typeof ${JAVASCRIPT_INTERFACE_NAME} !== 'undefined' && ${JAVASCRIPT_INTERFACE_NAME}.showToolbarFromScroll) {
                                                 ${JAVASCRIPT_INTERFACE_NAME}.showToolbarFromScroll();
                                             }
                                         }
-                                    }, 150); // 150ms 防抖
+                                    }, 150);
                                 }
                                 window.addEventListener('scroll', checkScroll, false);
-                                // 初始檢查一次，以防頁面載入時就已在頂部或底部
                                 checkScroll();
                             })();
                         """.trimIndent()
@@ -287,19 +298,27 @@ fun MyWebView(
                 onWebViewReady(this)
             }
         },
-        update = { webView -> /* 更新邏輯 */ },
+        update = { /* webView -> Updates if needed */ },
         modifier = modifier
     )
 }
 
-// CustomWebViewClient 保持不變或按需修改
-open class CustomWebViewClient : WebViewClient() { // 改為 open 以便 MyWebView 中繼承和覆寫
+// Modified CustomWebViewClient to accept and call onPageReloaded
+open class CustomWebViewClient(private val onPageReloaded: () -> Unit) : WebViewClient() {
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
         val url = request?.url?.toString()
         return if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
             false
         } else {
+            // Handle other schemes or let the system handle them
+            // For example, you might want to launch an intent for "tel:", "mailto:", etc.
+            // For simplicity here, we just call super.
             super.shouldOverrideUrlLoading(view, request)
         }
+    }
+
+    override fun onPageFinished(view: WebView?, url: String?) {
+        super.onPageFinished(view, url)
+        onPageReloaded() // Call the callback when any page load finishes
     }
 }
